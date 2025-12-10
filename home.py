@@ -1,7 +1,7 @@
 import io
 import json
 import textwrap
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 
 import numpy as np
@@ -66,6 +66,8 @@ if "api_key" not in st.session_state:
     st.session_state.api_key = OPENAI_API_KEY
 if "model" not in st.session_state:
     st.session_state.model = "gpt-4o-mini"
+if "chart_spec" not in st.session_state:
+    st.session_state.chart_spec: Optional[Dict[str, Any]] = None
 
 
 # =========================
@@ -123,6 +125,90 @@ def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.select_dtypes(include=["float64", "float32"]).columns:
         df[col] = pd.to_numeric(df[col], downcast="float")
     return df
+
+
+# =========================
+# 시각화 헬퍼 함수
+# =========================
+TIME_LIKE_KEYWORDS = ["연도", "년도", "year", "Year", "주", "week"]
+
+
+def pick_time_like_column(df: pd.DataFrame) -> Optional[str]:
+    # 1) dtype이 datetime 계열인 열
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            return col
+    # 2) 이름에 시간/연도/주차 관련 키워드가 포함된 열
+    for col in df.columns:
+        if any(k.lower() in col.lower() for k in TIME_LIKE_KEYWORDS):
+            return col
+    return None
+
+
+def pick_numeric_column(df: pd.DataFrame, exclude: Optional[str] = None) -> Optional[str]:
+    numeric_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c != exclude]
+    return numeric_cols[0] if numeric_cols else None
+
+
+def infer_chart(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+    """
+    간단한 규칙 기반 차트 추천.
+    returns (x, y, size, chart_type_label)
+    """
+    x_auto = pick_time_like_column(df)
+    y_auto = pick_numeric_column(df, exclude=x_auto)
+
+    # x 기준으로 차트 유형 판단
+    chart_label = "선(line)"
+    if x_auto is None and y_auto is not None:
+        # 시간축 없으면 가장 단순한 막대/산점도로
+        x_auto = df.columns[0]
+        chart_label = "막대(bar)"
+    elif x_auto is None and y_auto is None:
+        chart_label = "막대(bar)"
+    else:
+        if x_auto and (pd.api.types.is_datetime64_any_dtype(df[x_auto]) or any(k.lower() in x_auto.lower() for k in TIME_LIKE_KEYWORDS)):
+            chart_label = "선(line)"
+        elif y_auto is not None:
+            # 범주 x + 수치 y -> 막대
+            chart_label = "막대(bar)"
+        else:
+            chart_label = "산점도(scatter)"
+
+    return x_auto, y_auto, None, chart_label
+
+
+def auto_describe_trend(df: pd.DataFrame, x: str, y: str) -> str:
+    """
+    간단한 규칙 기반 추세 설명 (2~3문장).
+    """
+    if x not in df.columns or y not in df.columns:
+        return ""
+    series = df[y].dropna()
+    if series.empty or not pd.api.types.is_numeric_dtype(series):
+        return ""
+    first, last = series.iloc[0], series.iloc[-1]
+    direction = last - first
+    trend = "증가" if direction > 0 else "감소" if direction < 0 else "변화가 거의 없음"
+
+    # 변동성 확인
+    diff = series.diff().dropna()
+    if not diff.empty:
+        pos_ratio = (diff > 0).mean()
+        neg_ratio = (diff < 0).mean()
+    else:
+        pos_ratio = neg_ratio = 0
+
+    variability = ""
+    if pos_ratio > 0.7:
+        variability = "전체적으로 값이 증가하는 경향이 있습니다."
+    elif neg_ratio > 0.7:
+        variability = "전체적으로 값이 감소하는 경향이 있습니다."
+    else:
+        variability = "값의 변동 폭이 크고, 뚜렷한 증가/감소 경향은 보이지 않습니다."
+
+    direction_text = f"처음 값({first:.2f}) 대비 마지막 값({last:.2f})이 {'높아졌습니다' if direction > 0 else '낮아졌습니다' if direction < 0 else '비슷합니다'}."
+    return f"{variability} {direction_text}"
 if file:
     df = load_dataframe(file)
     df = optimize_dtypes(df)
@@ -154,30 +240,74 @@ else:
 # =========================
 st.markdown("## 2) 데이터 시각화 📊")
 st.caption("핵심 차트 유형만 선택하고, AI와 함께 해석에 집중해 보세요.")
+auto_mode = st.checkbox("🔀 자동 차트 추천 사용", value=True, help="데이터에서 시간/연도/주차/수치 열을 찾아 자동으로 차트를 만듭니다.")
+
+all_cols = df.columns.tolist()
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+# 자동 추천 실행
+auto_x, auto_y, auto_size, auto_chart_label = infer_chart(df)
+if auto_mode:
+    st.info(
+        f"추천 결과: 차트 유형='{auto_chart_label}', X축='{auto_x}', Y축='{auto_y if auto_y else '없음'}'"
+    )
+    if auto_y is None:
+        st.warning("수치형 열을 찾지 못했습니다. 필요하면 자동 모드를 끄고 직접 Y축을 선택하세요.")
+
 chart_type = st.selectbox(
     "차트 유형",
-    ["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"]
+    ["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"],
+    index=["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"].index(auto_chart_label) if auto_mode else 0,
+    disabled=auto_mode
 )
+
 if chart_type.startswith("원("):
     x_label = "이름 (범주 열)"; y_label = "값 (수치 열)"; size_label = "추가 범례 (선택)"
 elif chart_type.startswith("지도"):
     x_label = "위도 (Latitude) 열"; y_label = "경도 (Longitude) 열"; size_label = "크기/강도 (Magnitude) 열"
 else: 
     x_label = "X축"; y_label = "Y축 (필요시)"; size_label = "크기 (선택, 산점도용)"
+
 viz_col1, viz_col2, viz_col3 = st.columns(3)
-with viz_col1: x_col = st.selectbox(x_label, options=df.columns, index=0)
-with viz_col2: y_col = st.selectbox(y_label, options=["- 선택 안함 -"] + df.columns.tolist(), index=0)
-with viz_col3: size_col = st.selectbox(size_label, options=["- 선택 안함 -"] + df.columns.tolist(), index=0)
-all_cols = df.columns.tolist()
+with viz_col1:
+    x_col = st.selectbox(
+        x_label,
+        options=all_cols,
+        index=all_cols.index(auto_x) if auto_mode and auto_x in all_cols else 0,
+        disabled=auto_mode and auto_x is not None
+    )
+with viz_col2:
+    y_options = ["- 선택 안함 -"] + (numeric_cols if numeric_cols else all_cols)
+    y_default = auto_y if auto_mode and auto_y in y_options else "- 선택 안함 -"
+    y_col = st.selectbox(
+        y_label,
+        options=y_options,
+        index=y_options.index(y_default) if y_default in y_options else 0,
+        help="수치형 열을 우선 보여줍니다.",
+        disabled=auto_mode and auto_y is not None
+    )
+with viz_col3:
+    size_col = st.selectbox(
+        size_label,
+        options=["- 선택 안함 -"] + all_cols,
+        index=0 if not auto_size else all_cols.index(auto_size) + 1,
+        disabled=auto_mode and auto_size is not None
+    )
+
 hover_cols = st.multiselect(
     "💡 차트 툴팁(마우스 오버)에 표시할 추가 정보",
-    options=all_cols, default=None
+    options=all_cols, default=None, disabled=auto_mode
 )
 agg_fn = "count"
 if chart_type.startswith("막대("):
-    agg_fn = st.selectbox("집계 함수(막대)", ["count", "sum", "mean", "median"], help="Y축이 없으면 'count'가 자동 적용됩니다.")
+    agg_fn = st.selectbox("집계 함수(막대)", ["count", "sum", "mean", "median"], help="Y축이 없으면 'count'가 자동 적용됩니다.", disabled=auto_mode and auto_y is None)
+
 def get_val(opt): return None if (opt == "- 선택 안함 -" or opt == "-") else opt
-x = x_col; y = get_val(y_col); size = get_val(size_col); hover = hover_cols if hover_cols else None
+x = x_col if not auto_mode else auto_x or x_col
+y = get_val(y_col) if not auto_mode else auto_y or get_val(y_col)
+size = get_val(size_col) if not auto_mode else auto_size or get_val(size_col)
+hover = hover_cols if hover_cols else None
+
 fig = None; chart_spec = None
 try:
     if chart_type.startswith("선("):
@@ -214,8 +344,14 @@ try:
             chart_spec = {"chart_type": "Map (Scatter Geo)", "lat": x, "lon": y, "size": size, "hover": hover}
 except Exception as e:
     st.error(f"차트 생성 중 오류: {e}")
+
+st.session_state.chart_spec = chart_spec
+
 if fig is not None:
     st.plotly_chart(fig, use_container_width=True)
+    if x and y and pd.api.types.is_numeric_dtype(df[y]):
+        st.markdown("#### 🔍 간단한 자동 해석")
+        st.info(auto_describe_trend(df[[x, y]].dropna(), x, y))
 else:
     st.info("위의 옵션을 선택하여 시각화를 생성해 보세요.")
 
@@ -230,21 +366,23 @@ st.caption("AI에게 데이터와 차트를 분석해 달라고 요청해 보세
 def summarize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> str:
     """데이터프레임을 AI가 이해하기 쉬운 상세한 JSON 요약으로 변환합니다."""
     
-    # 1. 스키마 (데이터 타입)
-    schema = {col: str(df[col].dtype) for col in df.columns}
+    # 1. 스키마 (데이터 타입) - 열이 많으면 앞 20개만
+    limited_cols = df.columns[:20]
+    schema = {col: str(df[col].dtype) for col in limited_cols}
     
     # 2. 미리보기 (Head)
     preview = df.head(max_rows).to_dict(orient="records")
     
-    # 3. 통계 요약 (Numerical)
+    # 3. 통계 요약 (Numerical) - 너무 넓을 경우 앞 20개만
+    numeric_cols = df.select_dtypes(include=[np.number]).columns[:20]
     try:
-        numerical_summary = df.describe().to_dict()
+        numerical_summary = df[numeric_cols].describe().to_dict() if len(numeric_cols) > 0 else {}
     except Exception:
         numerical_summary = {} # 수치형 데이터가 없을 경우
         
-    # 4. 범주형 요약 (Categorical)
+    # 4. 범주형 요약 (Categorical) - 앞 20개만
     categorical_summary = {}
-    for col in df.select_dtypes(include=['object', 'category']).columns:
+    for col in df.select_dtypes(include=['object', 'category']).columns[:20]:
         categorical_summary[col] = {
             "nunique": df[col].nunique(),
             "top_5_values": df[col].value_counts().head(5).to_dict()
@@ -264,47 +402,36 @@ def summarize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
 
 
-# build_messages
-def build_messages(prompt: str, data_brief: str) -> List[Dict[str, str]]:
-    
+def build_messages(prompt, data_brief, chart_spec, add_data_head, add_context):
     # --- RAG ---
     system_prompt = f"""
-    [역할]
-    너는 대한민국 중학교 과학 교사(장윤하 선생님)를 돕는 'AI 데이터 분석 전문가'이자 '과학 보조 교사'이다.
+[역할 & 톤]
+너는 중학교 과학 수업에서 학생들과 대화하는 한국인 과학 교사다. 말투는 친근하고 짧게, 논문체/교사용 안내문처럼 말하지 않는다.
 
-    [핵심 임무]
-    중학생들이 '재해·재난과 안전' 단원을 탐구할 수 있도록, 제공된 [데이터 요약]과 [차트 정보]를 [교육과정 지식] 및 [과학 원리 지식]과 연결하여 **실질적이고 비판적인 해석**을 제공해야 한다.
-    
-    [규칙 1: 지식 기반 (RAG)]
-    너의 모든 답변은 반드시 아래 제공된 두 가지 핵심 지식을 근거로 해야 한다.
-    
-    1. [교육과정 지식] (knowledge_curriculum.txt의 내용)
-    {KNOWLEDGE_CURRICULUM if KNOWLEDGE_CURRICULUM else "N/A"}
+[답변 방식]
+- 숫자/경향 해석: 오직 제공된 [데이터 요약], [차트 정보]에 있는 값과 패턴만 사용한다.
+- 과학 개념·교육과정 연결: 아래 두 지식 파일의 내용에 기반해 설명한다.
+  • [교육과정 지식] (knowledge_curriculum.txt)
+  {KNOWLEDGE_CURRICULUM if KNOWLEDGE_CURRICULUM else "N/A"}
+  • [과학 원리 지식] (knowledge_disasters.txt)
+  {KNOWLEDGE_DISASTERS if KNOWLEDGE_DISASTERS else "N/A"}
+- 수업 톤: 학생에게 말하듯 간단히 설명하고, 이어서 “왜 그럴까?” “다른 자료와 비교하면 어떨까?” 같은 생각거리를 1~2개 자연스럽게 던진다.
+- 데이터가 부족하면 모르는 부분을 솔직히 말한다.
+- 수업 범위를 벗어난 질문엔 “이 챗봇은 중학교 과학 수업 지원용입니다.”라고 답한다.
 
-    2. [과학 원리 지식] (knowledge_disasters.txt의 내용)
-    {KNOWLEDGE_DISASTERS if KNOWLEDGE_DISASTERS else "N/A"}
-
-    [규칙 2: 데이터 기반 (Grounded)]
-    너의 분석은 **절대로** 너의 일반 상식이나 학습된 데이터를 기반으로 하면 안 된다.
-    **오직** 아래 제공되는 [데이터 요약]과 [차트 정보]에서 관찰된 **구체적인 숫자, 경향, 패턴**만을 근거로 해석해야 한다.
-    만약 데이터가 부족하면, "데이터에 따르면..."이라고 말하지 말고 "데이터가 부족하여 알 수 없지만..."이라고 명확히 밝혀야 한다.
-
-    [규칙 3: 용도 제한 (Context Bound)]
-    주어진 용도 (중학생 과학 수업)를 벗어난 대화에 대해서는 답변하지 말고, 반드시 "이 챗봇은 중학교 과학 수업 지원용입니다."라고 답변해라.
-
-    [출력 형식]
-    - 중학생이 이해할 수 있도록 명확하고 간결한 문장 사용
-    - 전문가적이지만 친절한 어조 사용
-    - 핵심 내용은 굵은 글씨(**)와 bullet points (•)를 사용해 정리
+[출력 형식]
+- 짧은 문장, 친근한 구어체 한국어
+- 중요한 수치는 근거를 함께 언급
+- bullet(•)과 **굵은 글씨**로 핵심을 정리
     """
     
     msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     
     # --- 컨텍스트 ---
     ctx_parts = []
-    if add_data_head: # 체크박스가 True일 때
+    if add_data_head:
         ctx_parts.append(f"[데이터 요약]\n{data_brief}")
-    if add_context and chart_spec: # 체크박스가 True일 때
+    if add_context and chart_spec:
         ctx_parts.append(f"[현재 시각화된 차트 정보]\n{json.dumps(chart_spec, ensure_ascii=False, indent=2)}")
     
     ctx = "\n\n".join(ctx_parts) if ctx_parts else "(제공된 데이터 컨텍스트 없음)"
@@ -339,8 +466,8 @@ def call_openai(messages: List[Dict[str, str]], model: str, api_key: str) -> str
 try:
     data_brief = summarize_dataframe(df, max_rows=5)
 except Exception as e:
-    data_brief = f"데이터 요약 생성 실패: {e}"
-    st.warning(data_brief)
+    data_brief = "데이터 요약이 제공되지 않아, 그래프에서 보이는 정보 중심으로 설명할게."
+    st.warning(f"데이터 요약 생성 실패: {e}")
 
 # 프롬프트
 default_prompt = (
@@ -349,43 +476,47 @@ default_prompt = (
     "2. 이 현상을 [과학 원리 지식]과 어떻게 연결할 수 있나요?\n"
     "3. 이 데이터를 [교육과정 지식]의 성취기준과 연결할 때, 어떤 비판적 질문을 토론해 볼 수 있을까요?"
 )
-user_prompt = st.text_area("질문 입력:", value=default_prompt, height=200)
-
-col_chat1, col_chat2 = st.columns([1, 2])
-with col_chat1:
+st.markdown("#### 컨텍스트 전달 옵션")
+opt_col1, opt_col2 = st.columns([1, 1])
+with opt_col1:
     add_context = st.checkbox("그래프 메타데이터 포함", True, help="차트 유형, 축, 집계 방식 등 메타를 LLM에 전달")
-with col_chat2:
+with opt_col2:
     add_data_head = st.checkbox("데이터 요약(통계 포함) 포함", True, help="AI가 실제 데이터를 분석하도록 통계 요약본을 전달합니다.")
 
-chat_cols = st.columns([1, 1, 6])
-with chat_cols[0]:
-    if st.button("AI 해석 요청", type="primary", use_container_width=True):
-        with st.spinner("AI가 데이터를 분석 중입니다..."):
-            # data_brief를 인자로 전달
-            msgs = build_messages(user_prompt, data_brief)
-            
-            # (디버깅용) AI에게 보낸 최종 프롬프트 확인
-            # with st.expander("[Debug] AI에게 전송된 최종 프롬프트"):
-            #     st.json(msgs)
-
-            answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
-            st.session_state.chat_history.append({"role": "user", "content": user_prompt})
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
-
-with chat_cols[1]:
-    if st.button("기록 지우기", use_container_width=True):
-        st.session_state.chat_history = []
-
-# --- 대화창 (변경 없음) ---
-st.markdown("### 대화 기록")
+st.markdown("### 대화")
 if not st.session_state.chat_history:
-    st.info("데이터를 업로드/시각화한 후, ‘AI 해석 요청’을 눌러보세요.")
-else:
-    for turn in st.session_state.chat_history:
-        if turn["role"] == "user":
-            st.markdown(f"**🧑 질문**\n\n{turn['content']}")
-        else:
-            st.markdown(f"**🤖 답변**\n\n{turn['content']}")
+    st.info("예시 질문을 눌러 바로 대화를 시작할 수 있어요.")
+    if st.button("예시 질문 불러오기", type="secondary"):
+        st.session_state.chat_history.append({"role": "user", "content": default_prompt})
+        msgs = build_messages(default_prompt, data_brief, st.session_state.chart_spec, add_data_head, add_context)
+        answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+# 대화 렌더링
+for turn in st.session_state.chat_history:
+    with st.chat_message(turn["role"]):
+        st.markdown(turn["content"])
+
+# 입력창
+user_prompt = st.chat_input("질문을 입력하세요")
+if user_prompt:
+    if st.session_state.df is None or st.session_state.df.empty:
+        st.warning("데이터를 먼저 업로드해 주세요.")
+    elif data_brief.startswith("데이터 요약이 제공되지 않아"):
+        st.warning("데이터 요약이 준비되지 않아, 그래프 중심으로만 안내합니다.")
+    else:
+        st.session_state.chat_history.append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("AI가 데이터를 분석 중입니다..."):
+                msgs = build_messages(user_prompt, data_brief, st.session_state.chart_spec, add_data_head, add_context)
+                answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
+                st.markdown(answer)
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+
+if st.button("기록 지우기", use_container_width=True):
+    st.session_state.chat_history = []
 
 with st.expander("ℹ️ 도움말 / 주의"):
     st.markdown(

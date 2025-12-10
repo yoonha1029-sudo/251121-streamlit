@@ -22,78 +22,65 @@ st.info("이 페이지의 파일들은 교사가 수업용으로 미리 정제�
 
 st.markdown("---")
 
+# 카드 렌더 헬퍼
+def render_card(title, desc, file_bytes, file_name, source_label, source_url):
+    with st.container():
+        st.markdown(f"#### {title}")
+        st.write(desc)
+        if file_bytes:
+            st.download_button(
+                label="CSV 다운로드",
+                data=file_bytes,
+                file_name=file_name,
+                mime="text/csv",
+                use_container_width=True,
+            )
+        else:
+            st.warning("파일을 찾을 수 없습니다.")
+        st.markdown(f"📖 원본 출처: [{source_label}]({source_url})")
+
+
 # =========================
 # 1. 국내 기상·기후 데이터
 # =========================
 st.subheader("국내 기상·기후 데이터")
+domestic_cards = [
+    {
+        "title": "🌡️ 국내 평균기온 데이터",
+        "desc": "연도별 평균기온 변화를 볼 수 있는 데이터입니다.",
+        "file": "국내_기온_데이터.csv",
+        "source_label": "기상자료개방포털",
+        "source_url": "https://data.kma.go.kr",
+    },
+    {
+        "title": "🧊 국내 서리일수 데이터",
+        "desc": "연도별 서리 발생 일수를 정리했습니다.",
+        "file": "국내_서리일수_데이터.csv",
+        "source_label": "기상자료개방포털",
+        "source_url": "https://data.kma.go.kr",
+    },
+    {
+        "title": "🌃 국내 열대야일수 데이터",
+        "desc": "연도별 열대야(최저기온 25℃ 이상) 발생 일수입니다.",
+        "file": "국내_열대야일수_데이터.csv",
+        "source_label": "기상자료개방포털",
+        "source_url": "https://data.kma.go.kr",
+    },
+    {
+        "title": "🤧 국내 인플루엔자(독감) 지표 데이터",
+        "desc": "연도·주차별 인플루엔자 의사환자 지표입니다.",
+        "file": "국내_인플루엔자_데이터.csv",
+        "source_label": "질병관리청 감염병 포털",
+        "source_url": "https://www.kdca.go.kr",
+    },
+]
 
-col1, col2 = st.columns(2)
-
-with col1:
-    # 국내 평균 기온
-    f_temp = load_local_file_bytes("국내_기온_데이터.csv")
-    st.markdown("### 🌡️ 국내 평균기온 데이터")
-    st.write("연도별 평균기온 변화를 볼 수 있는 데이터입니다.")
-    if f_temp:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_temp,
-            file_name="국내_기온_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: [기상자료개방포털](https://data.kma.go.kr)\n"
-    )
-
-    st.markdown("---")
-
-    # 국내 서리일수
-    f_frost = load_local_file_bytes("국내_서리일수_데이터.csv")
-    st.markdown("### 🧊 국내 서리일수 데이터")
-    st.write("연도별 서리 발생 일수를 정리한 데이터입니다.")
-    if f_frost:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_frost,
-            file_name="국내_서리일수_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: [기상자료개방포털](https://data.kma.go.kr)\n"
-    )
-
-with col2:
-    # 국내 열대야
-    f_tropical_night = load_local_file_bytes("국내_열대야일수_데이터.csv")
-    st.markdown("### 🌃 국내 열대야일수 데이터")
-    st.write("연도별 열대야(최저기온 25℃ 이상) 발생 일수 데이터입니다.")
-    if f_tropical_night:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_tropical_night,
-            file_name="국내_열대야일수_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: [기상자료개방포털](https://data.kma.go.kr)\n"
-    )
-
-    st.markdown("---")
-
-    # 국내 인플루엔자
-    f_flu = load_local_file_bytes("국내_인플루엔자_데이터.csv")
-    st.markdown("### 🤧 국내 인플루엔자(독감) 지표 데이터")
-    st.write("연도 또는 주차별 인플루엔자 의사환자 지표를 정리한 데이터입니다.")
-    if f_flu:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_flu,
-            file_name="국내_인플루엔자_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: 질병관리청 감염병 포털, 감염병 감시체계 자료\n"
-    )
+for i in range(0, len(domestic_cards), 2):
+    cols = st.columns(2)
+    for col, card in zip(cols, domestic_cards[i:i+2]):
+        with col:
+            file_bytes = load_local_file_bytes(card["file"])
+            render_card(card["title"], card["desc"], file_bytes, card["file"], card["source_label"], card["source_url"])
 
 st.markdown("---")
 
@@ -101,76 +88,43 @@ st.markdown("---")
 # 2. 전 세계 재해·환경 데이터
 # =========================
 st.subheader("🌍 전 세계 재해·환경 데이터")
+global_cards = [
+    {
+        "title": "🌊 세계 기록적 홍수 데이터",
+        "desc": "1985년 이후 보고된 대규모·극심한 홍수 사건 수입니다.",
+        "file": "세계_기록적홍수_데이터.csv",
+        "source_label": "Dartmouth Flood Observatory",
+        "source_url": "http://floodobservatory.colorado.edu/Archives/index.html",
+    },
+    {
+        "title": "🔥 세계 산불·산림 손실 데이터",
+        "desc": "연도별 산림 손실 면적과 산불로 인한 손실 면적을 담았습니다.",
+        "file": "세계_산불_데이터.csv",
+        "source_label": "Global Forest Watch",
+        "source_url": "https://www.globalforestwatch.org/dashboards/global/?category=land-cover&location=WyJnbG9iYWwiXQ%3D%3D",
+    },
+    {
+        "title": "🟢 세계 이산화탄소(CO₂) 농도/배출 데이터",
+        "desc": "연도별 CO₂ 농도 또는 배출량 추이를 정리했습니다.",
+        "file": "세계_연이산화탄소배출량_데이터.csv",
+        "source_label": "NOAA CO₂ 데이터",
+        "source_url": "https://gml.noaa.gov/ccgg/trends/gl_data.html",
+    },
+    {
+        "title": "🌏 세계 지진(규모 6 이상) 데이터",
+        "desc": "1900년 이후 규모 6.0 이상 지진 발생 건수를 담았습니다.",
+        "file": "세계_지진_진도6이상_데이터.csv",
+        "source_label": "USGS Earthquake Catalog",
+        "source_url": "https://www.usgs.gov/programs/earthquake-hazards/lists-maps-and-statistics",
+    },
+]
 
-# 2-1. 홍수, 지진
-col3, col4 = st.columns(2)
-
-with col3:
-    # 세계 기록적 홍수
-    f_flood = load_local_file_bytes("세계_기록적홍수_데이터.csv")
-    st.markdown("### 🌊 세계 기록적 홍수 데이터")
-    st.write("1985년 이후 전 세계에서 보고된 대규모·극심한 홍수 사건 수를 정리한 데이터입니다.")
-    if f_flood:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_flood,
-            file_name="세계_기록적홍수_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: Dartmouth Flood Observatory\n"
-        "[http://floodobservatory.colorado.edu/Archives/index.html](http://floodobservatory.colorado.edu/Archives/index.html)"
-    )
-
-    st.markdown("---")
-
-    # 세계 산불(산림 손실)
-    f_forest_fire = load_local_file_bytes("세계_산불_데이터.csv")
-    st.markdown("### 🔥 세계 산불·산림 손실 데이터")
-    st.write("연도별 산림 손실 면적, 산불로 인한 산림 손실 면적 등을 정리한 데이터입니다.")
-    if f_forest_fire:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_forest_fire,
-            file_name="세계_산불_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: [Global Forest Watch](https://www.globalforestwatch.org/dashboards/global/?category=land-cover&location=WyJnbG9iYWwiXQ%3D%3D)\n"
-    )
-
-with col4:
-    # 세계 이산화탄소
-    f_carbon_emission = load_local_file_bytes("세계_연이산화탄소배출량_데이터.csv")
-    st.markdown("### 🟢 세계 이산화탄소(CO₂) 농도/배출 데이터")
-    st.write("연도별 대기 중 이산화탄소 농도 또는 CO₂ 배출량 데이터를 정리한 자료입니다.")
-    if f_carbon_emission:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_carbon_emission,
-            file_name="세계_연이산화탄소배출량_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **원본 출처**: [NOAA CO₂ 데이터](https://gml.noaa.gov/ccgg/trends/gl_data.html)\n"
-
-    st.markdown("---")
-
-    # 세계 지진
-    f_earthquake = load_local_file_bytes("세계_지진_진도6이상_데이터.csv")
-    st.markdown("### 🌏 세계 지진(규모 6 이상) 데이터")
-    st.write("1900년 이후 규모 6.0 이상 지진의 연도별 발생 건수 등을 정리한 데이터입니다.")
-    if f_earthquake:
-        st.download_button(
-            label="CSV 다운로드",
-            data=f_earthquake,
-            file_name="세계_지진_진도6이상_데이터.csv",
-            mime="text/csv",
-        )
-    st.markdown(
-        "- **출처**: USGS Earthquake Catalog\n"
-        "[https://www.usgs.gov/programs/earthquake-hazards/lists-maps-and-statistics](https://www.usgs.gov/programs/earthquake-hazards/lists-maps-and-statistics)"
-    )
+for i in range(0, len(global_cards), 2):
+    cols = st.columns(2)
+    for col, card in zip(cols, global_cards[i:i+2]):
+        with col:
+            file_bytes = load_local_file_bytes(card["file"])
+            render_card(card["title"], card["desc"], file_bytes, card["file"], card["source_label"], card["source_url"])
 
 st.markdown("---")
 
