@@ -200,9 +200,9 @@ def auto_describe_trend(df: pd.DataFrame, x: str, y: str) -> str:
         pos_ratio = neg_ratio = 0
 
     variability = ""
-    if pos_ratio > 0.7:
+    if pos_ratio > 0.2:
         variability = "전체적으로 값이 증가하는 경향이 있습니다."
-    elif neg_ratio > 0.7:
+    elif neg_ratio > 0.2:
         variability = "전체적으로 값이 감소하는 경향이 있습니다."
     else:
         variability = "값의 변동 폭이 크고, 뚜렷한 증가/감소 경향은 보이지 않습니다."
@@ -406,7 +406,7 @@ def build_messages(prompt, data_brief, chart_spec, add_data_head, add_context):
     # --- RAG ---
     system_prompt = f"""
 [역할 & 톤]
-너는 중학교 과학 수업에서 학생들과 대화하는 한국인 과학 교사다. 말투는 친근하고 짧게, 논문체/교사용 안내문처럼 말하지 않는다.
+너는 중학교 과학 수업에서 장윤하 선생님을 돕는 한국인 과학 보조 교사다. 말투는 친근하고 짧게, 논문체/교사용 안내문처럼 말하지 않는다.
 
 [답변 방식]
 - 숫자/경향 해석: 오직 제공된 [데이터 요약], [차트 정보]에 있는 값과 패턴만 사용한다.
@@ -484,6 +484,8 @@ with opt_col2:
     add_data_head = st.checkbox("데이터 요약(통계 포함) 포함", True, help="AI가 실제 데이터를 분석하도록 통계 요약본을 전달합니다.")
 
 st.markdown("### 대화")
+if st.button("기록 지우기", use_container_width=True):
+    st.session_state.chat_history = []
 if not st.session_state.chat_history:
     st.info("예시 질문을 눌러 바로 대화를 시작할 수 있어요.")
     if st.button("예시 질문 불러오기", type="secondary"):
@@ -515,12 +517,11 @@ if user_prompt:
                 st.markdown(answer)
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
-if st.button("기록 지우기", use_container_width=True):
-    st.session_state.chat_history = []
+
 
 with st.expander("ℹ️ 도움말 / 주의"):
     st.markdown(
         """
-- **교육 맥락**: AI는 '재해·재난과 안전' 단원 성취기준과 SSI 쟁점 토론을 유도하도록 설정되었습니다.
+- 이 AI 챗봇은 '재해·재난과 안전' 단원 수업을 위해 설정되었습니다.
         """
     )
