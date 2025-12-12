@@ -3,12 +3,12 @@ import json
 import textwrap
 from typing import Dict, Any, List, Optional, Tuple
 import os
+import datetime
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import datetime
 
 # ---- OpenAI SDK 확인 ----
 try:
@@ -19,15 +19,35 @@ except Exception:
 
 
 # =========================
-# API 키 (코드 내 삽입)
+# API 키 로드 함수 (secrets.toml + 환경변수)
 # =========================
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+def load_api_key() -> Optional[str]:
+    """
+    1순위: .streamlit/secrets.toml 의 OPENAI_API_KEY
+    2순위: 환경 변수 OPENAI_API_KEY
+    둘 다 없으면 None
+    """
+    # 1) secrets.toml에서 시도
+    try:
+        key = st.secrets["OPENAI_API_KEY"]
+        if key:
+            return key
+    except Exception:
+        pass
+
+    # 2) 환경 변수에서 시도
+    env_key = os.getenv("OPENAI_API_KEY")
+    if env_key:
+        return env_key
+
+    # 3) 실패 시 None
+    return None
 
 
 # =========================
-# [신규] 지식 파일 로드 헬퍼 (Simplified RAG)
+# 지식 파일 로드 헬퍼 (Simplified RAG)
 # =========================
-@st.cache_data # 앱 실행 시 한 번만 읽도록 캐시
+@st.cache_data  # 앱 실행 시 한 번만 읽도록 캐시
 def load_knowledge_file(file_path):
     """app.py와 동일한 위치에 있는 .txt 지식 파일을 읽습니다."""
     try:
@@ -41,6 +61,7 @@ def load_knowledge_file(file_path):
         st.error(f"지식 파일 로드 오류: {e}")
         return ""
 
+
 # --- 앱 시작 시 지식 파일 로드 ---
 KNOWLEDGE_CURRICULUM = load_knowledge_file("knowledge_curriculum.txt")
 KNOWLEDGE_DISASTERS = load_knowledge_file("knowledge_disasters.txt")
@@ -50,8 +71,8 @@ KNOWLEDGE_DISASTERS = load_knowledge_file("knowledge_disasters.txt")
 # 페이지 기본 설정
 # =========================
 st.set_page_config(
-    page_title="AI 기반 빅데이터 탐구 (홈)", 
-    page_icon="🛰️",
+    page_title="AI 기반 빅데이터 탐구",
+    page_icon="images/extreme.png",
     layout="wide",
 )
 
@@ -63,7 +84,8 @@ if "chat_history" not in st.session_state:
 if "df" not in st.session_state:
     st.session_state.df: Optional[pd.DataFrame] = None
 if "api_key" not in st.session_state:
-    st.session_state.api_key = OPENAI_API_KEY
+    # 여기서만 api_key 초기화 (OPENAI_API_KEY 상수 사용 X)
+    st.session_state.api_key = load_api_key() or ""
 if "model" not in st.session_state:
     st.session_state.model = "gpt-4o-mini"
 if "chart_spec" not in st.session_state:
@@ -75,10 +97,18 @@ if "chart_spec" not in st.session_state:
 # =========================
 with st.sidebar:
     st.markdown("## ⚙️ AI 모델 설정")
-    if st.session_state.api_key == "YOUR_OPENAI_API_KEY_HERE" or not st.session_state.api_key:
-        st.error("코드 상단의 OPENAI_API_KEY 변수에 실제 키를 입력하세요.")
+
+    if not st.session_state.api_key:
+        st.error(
+            "OpenAI API 키를 찾을 수 없습니다.\n\n"
+            "아래 중 한 가지 방법으로 설정해 주세요.\n"
+            "1) 프로젝트 폴더 안에 `.streamlit/secrets.toml` 생성 후\n"
+            '   `OPENAI_API_KEY = "실제_키"` 입력\n'
+            "2) 환경 변수 OPENAI_API_KEY 설정"
+        )
     else:
         st.success("OpenAI API Key가 로드되었습니다.")
+
     st.session_state.model = st.selectbox(
         "모델 선택",
         options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
@@ -88,37 +118,45 @@ with st.sidebar:
     st.divider()
     st.info("데이터 다운로드는 'data' 페이지를 참고하세요.")
 
-
 # =========================
 # 상단 헤더
 # =========================
-st.title("🛰️ 재해·재난과 안전 빅데이터 탐구 지원 챗봇")
+st.title("재해·재난과 안전 빅데이터 탐구하기")
 st.markdown(
-    "중학생 과학 ‘재해·재난과 안전’ 수업에서 **빅데이터 탐구**를 돕는 챗봇입니다. "
+    "‘재해·재난과 안전’ **빅데이터 탐구 수업**을 돕는 웹사이트입니다. "
     "데이터를 시각화하고, **AI에게 해석**을 요청해 보세요."
 )
-if st.session_state.api_key == "YOUR_OPENAI_API_KEY_HERE" or not st.session_state.api_key:
-    st.error("분석을 시작하기 전에 Streamlit 코드의 `OPENAI_API_KEY` 변수에 실제 OpenAI API 키를 입력해야 합니다.")
+
+# API 키 없으면 여기서 바로 중단
+if not st.session_state.api_key:
     st.stop()
 
 
 # =========================
 # 1) 데이터 불러오기
 # =========================
-st.markdown("## 1) 데이터 불러오기 📥")
+st.markdown("## 데이터 불러오기 📥")
 file = st.file_uploader(
     "CSV 또는 XLSX 파일 업로드",
     type=["csv", "xlsx"],
     accept_multiple_files=False,
     help="첫 번째 시트 기준(XLSX). 수업용 데이터는 'data' 페이지에서 다운로드 받으세요.",
 )
+
+
 def load_dataframe(_file) -> pd.DataFrame:
-    if _file is None: return pd.DataFrame()
+    if _file is None:
+        return pd.DataFrame()
     if _file.name.lower().endswith(".csv"):
-        try: df = pd.read_csv(_file, sep=",", low_memory=False, encoding='utf-8')
-        except UnicodeDecodeError: df = pd.read_csv(_file, sep=",", low_memory=False, encoding='cp949')
-    else: df = pd.read_excel(_file, engine="openpyxl")
+        try:
+            df = pd.read_csv(_file, sep=",", low_memory=False, encoding='utf-8')
+        except UnicodeDecodeError:
+            df = pd.read_csv(_file, sep=",", low_memory=False, encoding='cp949')
+    else:
+        df = pd.read_excel(_file, engine="openpyxl")
     return df
+
+
 def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.select_dtypes(include=["int64", "int32"]).columns:
         df[col] = pd.to_numeric(df[col], downcast="integer")
@@ -132,6 +170,31 @@ def optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 TIME_LIKE_KEYWORDS = ["연도", "년도", "year", "Year", "주", "week"]
 
+EARTHQUAKE_LAT_KEYWORDS = ["위도", "latitude", "lat"]
+EARTHQUAKE_LON_KEYWORDS = ["경도", "longitude", "lon"]
+EARTHQUAKE_MAG_KEYWORDS = ["규모", "진도", "magnitude", "mag"]
+
+
+def detect_earthquake_columns(df: pd.DataFrame):
+    """
+    지진 데이터로 보이면 (위도, 경도, 규모/진도) 컬럼을 찾아서 돌려줌.
+    최소한 위도+경도 두 개만 있으면 '지도' 자동 추천.
+    """
+    lat_col, lon_col, mag_col = None, None, None
+
+    for col in df.columns:
+        lower = col.lower()
+        if any(k in lower for k in EARTHQUAKE_LAT_KEYWORDS):
+            lat_col = col
+        if any(k in lower for k in EARTHQUAKE_LON_KEYWORDS):
+            lon_col = col
+        if any(k in lower for k in EARTHQUAKE_MAG_KEYWORDS):
+            mag_col = mag_col or col  # 여러 개면 첫 번째만
+
+    if lat_col and lon_col:
+        return lat_col, lon_col, mag_col
+
+    return None, None, None
 
 def pick_time_like_column(df: pd.DataFrame) -> Optional[str]:
     # 1) dtype이 datetime 계열인 열
@@ -151,10 +214,11 @@ def pick_numeric_column(df: pd.DataFrame, exclude: Optional[str] = None) -> Opti
 
 
 def infer_chart(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    """
-    간단한 규칙 기반 차트 추천.
-    returns (x, y, size, chart_type_label)
-    """
+
+    lat_col, lon_col, mag_col = detect_earthquake_columns(df)
+    if lat_col and lon_col:
+        return lat_col, lon_col, mag_col, "지도 (위도/경도)"
+    
     x_auto = pick_time_like_column(df)
     y_auto = pick_numeric_column(df, exclude=x_auto)
 
@@ -209,36 +273,45 @@ def auto_describe_trend(df: pd.DataFrame, x: str, y: str) -> str:
 
     direction_text = f"처음 값({first:.2f}) 대비 마지막 값({last:.2f})이 {'높아졌습니다' if direction > 0 else '낮아졌습니다' if direction < 0 else '비슷합니다'}."
     return f"{variability} {direction_text}"
+
+
+# --- 파일 업로드 처리 ---
 if file:
     df = load_dataframe(file)
     df = optimize_dtypes(df)
     st.session_state.df = df
+
 if st.session_state.df is not None and not st.session_state.df.empty:
     df = st.session_state.df
     st.success(f"불러온 데이터: {df.shape[0]:,}행 × {df.shape[1]:,}열")
+
     with st.expander("📋 데이터 미리보기(상위 100행)", expanded=True):
         st.dataframe(df.head(100), use_container_width=True)
+
     st.markdown("### 🔎 빠른 요약")
     col_meta1, col_meta2, col_meta3 = st.columns(3)
-    with col_meta1: st.metric("행 수", f"{df.shape[0]:,}")
-    with col_meta2: st.metric("열 수", f"{df.shape[1]:,}")
+    with col_meta1:
+        st.metric("행 수", f"{df.shape[0]:,}")
+    with col_meta2:
+        st.metric("열 수", f"{df.shape[1]:,}")
     with col_meta3:
         missing_total = int(df.isna().sum().sum())
         st.metric("결측치 총합", f"{missing_total:,}")
+
     with st.expander("🧮 기술통계(수치형)"):
         st.dataframe(df.describe().T, use_container_width=True)
     with st.expander("🧾 열 타입 정보"):
         info = pd.DataFrame({"dtype": df.dtypes.astype(str), "missing": df.isna().sum(), "unique": df.nunique()})
         st.dataframe(info, use_container_width=True)
 else:
-    st.info("왼쪽 사이드바에서 **[data]** 페이지를 클릭해 CSV 파일을 다운로드 받거나, 가지고 있는 파일을 업로드하여 탐구를 시작하세요.")
+    st.info("왼쪽 사이드바에서 **data** 페이지를 클릭해 분석할 데이터를 준비하세요.")
     st.stop()
 
 
 # =========================
 # 2) 데이터 시각화
 # =========================
-st.markdown("## 2) 데이터 시각화 📊")
+st.markdown("## 데이터 시각화")
 st.caption("핵심 차트 유형만 선택하고, AI와 함께 해석에 집중해 보세요.")
 auto_mode = st.checkbox("🔀 자동 차트 추천 사용", value=True, help="데이터에서 시간/연도/주차/수치 열을 찾아 자동으로 차트를 만듭니다.")
 
@@ -265,7 +338,7 @@ if chart_type.startswith("원("):
     x_label = "이름 (범주 열)"; y_label = "값 (수치 열)"; size_label = "추가 범례 (선택)"
 elif chart_type.startswith("지도"):
     x_label = "위도 (Latitude) 열"; y_label = "경도 (Longitude) 열"; size_label = "크기/강도 (Magnitude) 열"
-else: 
+else:
     x_label = "X축"; y_label = "Y축 (필요시)"; size_label = "크기 (선택, 산점도용)"
 
 viz_col1, viz_col2, viz_col3 = st.columns(3)
@@ -302,45 +375,59 @@ agg_fn = "count"
 if chart_type.startswith("막대("):
     agg_fn = st.selectbox("집계 함수(막대)", ["count", "sum", "mean", "median"], help="Y축이 없으면 'count'가 자동 적용됩니다.", disabled=auto_mode and auto_y is None)
 
+
 def get_val(opt): return None if (opt == "- 선택 안함 -" or opt == "-") else opt
+
+
 x = x_col if not auto_mode else auto_x or x_col
 y = get_val(y_col) if not auto_mode else auto_y or get_val(y_col)
 size = get_val(size_col) if not auto_mode else auto_size or get_val(size_col)
 hover = hover_cols if hover_cols else None
 
-fig = None; chart_spec = None
+fig = None
+chart_spec = None
 try:
     if chart_type.startswith("선("):
-        if y is None: st.warning("선 그래프는 Y축이 필요합니다.")
+        if y is None:
+            st.warning("선 그래프는 Y축이 필요합니다.")
         else:
             fig = px.line(df, x=x, y=y, hover_data=hover, height=500, title=f"{x}에 따른 {y} 변화")
             chart_spec = {"chart_type": "Line", "x": x, "y": y, "hover": hover}
     elif chart_type.startswith("막대("):
-        if y is None: 
+        if y is None:
             tmp = df.groupby(x).size().reset_index(name="count")
             fig = px.bar(tmp, x=x, y="count", hover_data=hover, height=500, title=f"{x}별 개수(count)")
             chart_spec = {"chart_type": "Bar (Count)", "x": x, "y": "count", "hover": hover}
-        else: 
+        else:
             agg_map = {"count": "count", "sum": "sum", "mean": "mean", "median": "median"}
             tmp = df.groupby(x)[y].agg(agg_map[agg_fn]).reset_index()
-            y_agg = f"{agg_fn}_{y}"; tmp = tmp.rename(columns={y: y_agg})
+            y_agg = f"{agg_fn}_{y}"
+            tmp = tmp.rename(columns={y: y_agg})
             fig = px.bar(tmp, x=x, y=y_agg, hover_data=hover, height=500, title=f"{x}별 {y}의 {agg_fn}")
             chart_spec = {"chart_type": "Bar (Aggregate)", "x": x, "y": y_agg, "function": agg_fn, "hover": hover}
     elif chart_type.startswith("산점도"):
-        if y is None: st.warning("산점도는 Y축이 필요합니다.")
+        if y is None:
+            st.warning("산점도는 Y축이 필요합니다.")
         else:
-            fig = px.scatter(df, x=x, y=y, size=size, hover_data=hover, opacity=0.7, height=500, title=f"{x}와 {y}의 관계 (크기: {size})")
+            fig = px.scatter(df, x=x, y=y, size=size, hover_data=hover, opacity=0.7, height=500,
+                             title=f"{x}와 {y}의 관계 (크기: {size})")
             chart_spec = {"chart_type": "Scatter", "x": x, "y": y, "size": size, "hover": hover}
     elif chart_type.startswith("원("):
-        if y is None: st.warning("원 그래프는 '값 (수치 열)' (Y축)이 필요합니다.")
+        if y is None:
+            st.warning("원 그래프는 '값 (수치 열)' (Y축)이 필요합니다.")
         else:
             fig = px.pie(df, names=x, values=y, hover_data=hover, height=500, title=f"{x}별 {y}의 비율")
             chart_spec = {"chart_type": "Pie", "names": x, "values": y, "hover": hover}
-    elif chart_type.startswith("지도"): 
-        if y is None: st.warning("지도 시각화는 '위도'와 '경도' 열이 모두 필요합니다.")
+    elif chart_type.startswith("지도"):
+        if y is None:
+            st.warning("지도 시각화는 '위도'와 '경도' 열이 모두 필요합니다.")
         else:
-            fig = px.scatter_geo(df, lat=x, lon=y, size=size, hover_data=hover, projection="natural earth", height=600, title=f"지도 시각화 (위도:{x}, 경도:{y}, 크기:{size})")
-            fig.update_geos(center={"lat": 36, "lon": 127.5}, lataxis_range=[33, 39], lonaxis_range=[124, 132], showcountries=True, showcoastlines=True)
+            fig = px.scatter_geo(df, lat=x, lon=y, size=size, hover_data=hover,
+                                 projection="natural earth", height=600,
+                                 title=f"지도 시각화 (위도:{x}, 경도:{y}, 크기:{size})")
+            fig.update_geos(center={"lat": 36, "lon": 127.5},
+                            lataxis_range=[33, 39], lonaxis_range=[124, 132],
+                            showcountries=True, showcoastlines=True)
             chart_spec = {"chart_type": "Map (Scatter Geo)", "lat": x, "lon": y, "size": size, "hover": hover}
 except Exception as e:
     st.error(f"차트 생성 중 오류: {e}")
@@ -359,27 +446,26 @@ else:
 # =========================
 # 3) 데이터 해석 챗봇
 # =========================
-st.markdown("## 3) 데이터 해석 챗봇 🤖")
+st.markdown("## 데이터 해석 챗봇")
 st.caption("AI에게 데이터와 차트를 분석해 달라고 요청해 보세요.")
 
-# [수정] summarize_dataframe: 통계 요약(describe)을 포함하도록 강화
+
 def summarize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> str:
     """데이터프레임을 AI가 이해하기 쉬운 상세한 JSON 요약으로 변환합니다."""
-    
     # 1. 스키마 (데이터 타입) - 열이 많으면 앞 20개만
     limited_cols = df.columns[:20]
     schema = {col: str(df[col].dtype) for col in limited_cols}
-    
+
     # 2. 미리보기 (Head)
     preview = df.head(max_rows).to_dict(orient="records")
-    
+
     # 3. 통계 요약 (Numerical) - 너무 넓을 경우 앞 20개만
     numeric_cols = df.select_dtypes(include=[np.number]).columns[:20]
     try:
         numerical_summary = df[numeric_cols].describe().to_dict() if len(numeric_cols) > 0 else {}
     except Exception:
-        numerical_summary = {} # 수치형 데이터가 없을 경우
-        
+        numerical_summary = {}
+
     # 4. 범주형 요약 (Categorical) - 앞 20개만
     categorical_summary = {}
     for col in df.select_dtypes(include=['object', 'category']).columns[:20]:
@@ -397,8 +483,6 @@ def summarize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> str:
         "categorical_summary (top 5 values)": categorical_summary
     }
 
-    # JSON 변환 시 ensure_ascii=False 로 한글 유지
-    # indent=2를 넣어 가독성 향상
     return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
 
 
@@ -424,16 +508,16 @@ def build_messages(prompt, data_brief, chart_spec, add_data_head, add_context):
 - 중요한 수치는 근거를 함께 언급
 - bullet(•)과 **굵은 글씨**로 핵심을 정리
     """
-    
+
     msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    
+
     # --- 컨텍스트 ---
     ctx_parts = []
     if add_data_head:
         ctx_parts.append(f"[데이터 요약]\n{data_brief}")
     if add_context and chart_spec:
         ctx_parts.append(f"[현재 시각화된 차트 정보]\n{json.dumps(chart_spec, ensure_ascii=False, indent=2)}")
-    
+
     ctx = "\n\n".join(ctx_parts) if ctx_parts else "(제공된 데이터 컨텍스트 없음)"
 
     user = f"{prompt}\n\n[참고할 컨텍스트]\n{ctx}"
@@ -441,12 +525,12 @@ def build_messages(prompt, data_brief, chart_spec, add_data_head, add_context):
     return msgs
 
 
-# call_openai
 def call_openai(messages: List[Dict[str, str]], model: str, api_key: str) -> str:
     if not OPENAI_AVAILABLE:
         return "⚠️ openai 패키지를 찾을 수 없습니다. `pip install openai` 후 다시 시도하세요."
-    if not api_key or api_key == "YOUR_OPENAI_API_KEY_HERE":
-        return "⚠️ OpenAI API Key가 필요합니다. 코드 상단의 `OPENAI_API_KEY` 변수를 수정하세요."
+    if not api_key:
+        return "⚠️ OpenAI API Key가 필요합니다. .streamlit/secrets.toml 또는 환경 변수 OPENAI_API_KEY를 설정해 주세요."
+
     try:
         client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
@@ -457,71 +541,153 @@ def call_openai(messages: List[Dict[str, str]], model: str, api_key: str) -> str
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"❌ OpenAI 호출 오류: {e}"
+        # 여기서 "Connection error"도 포함해서 다 보여줌
+        return f"❌ OpenAI 호출 오류: {type(e).__name__}: {e}"
 
 
 # --- 챗봇 UI ---
 
-# 데이터 요약
+# 1. 데이터 요약 로직
 try:
     data_brief = summarize_dataframe(df, max_rows=5)
 except Exception as e:
     data_brief = "데이터 요약이 제공되지 않아, 그래프에서 보이는 정보 중심으로 설명할게."
     st.warning(f"데이터 요약 생성 실패: {e}")
 
-# 프롬프트
-default_prompt = (
-    "현재 업로드된 [데이터 요약]과 [차트 정보]를 분석해 주세요.\n\n"
-    "1. 이 데이터에서 발견할 수 있는 가장 중요한 경향이나 사실은 무엇인가요? (데이터의 숫자를 근거로 들어주세요)\n"
-    "2. 이 현상을 [과학 원리 지식]과 어떻게 연결할 수 있나요?\n"
-    "3. 이 데이터를 [교육과정 지식]의 성취기준과 연결할 때, 어떤 비판적 질문을 토론해 볼 수 있을까요?"
-)
-st.markdown("#### 컨텍스트 전달 옵션")
-opt_col1, opt_col2 = st.columns([1, 1])
-with opt_col1:
-    add_context = st.checkbox("그래프 메타데이터 포함", True, help="차트 유형, 축, 집계 방식 등 메타를 LLM에 전달")
-with opt_col2:
-    add_data_head = st.checkbox("데이터 요약(통계 포함) 포함", True, help="AI가 실제 데이터를 분석하도록 통계 요약본을 전달합니다.")
+# 2. 헤더 및 설정
+col_head, col_opt = st.columns([3, 1])
+with col_head:
+    st.subheader("AI 데이터 탐구 대화")
 
-st.markdown("### 대화")
-if st.button("기록 지우기", use_container_width=True):
-    st.session_state.chat_history = []
-if not st.session_state.chat_history:
-    st.info("예시 질문을 눌러 바로 대화를 시작할 수 있어요.")
-    if st.button("예시 질문 불러오기", type="secondary"):
-        st.session_state.chat_history.append({"role": "user", "content": default_prompt})
-        msgs = build_messages(default_prompt, data_brief, st.session_state.chart_spec, add_data_head, add_context)
-        answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
-        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+with col_opt:
+    with st.popover("분석 설정"):
+        st.caption("AI에게 제공할 정보를 선택하세요.")
+        add_context = st.checkbox("그래프 메타데이터 포함", True)
+        add_data_head = st.checkbox("데이터 요약본 포함", True)
 
-# 대화 렌더링
-for turn in st.session_state.chat_history:
-    with st.chat_message(turn["role"]):
-        st.markdown(turn["content"])
+        if st.button("대화 기록 초기화", type="primary", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
 
-# 입력창
-user_prompt = st.chat_input("질문을 입력하세요")
-if user_prompt:
+# 3. 대화 내용 렌더링
+chat_container = st.container()
+
+with chat_container:
+    if not st.session_state.chat_history:
+        st.info("데이터에 대해 궁금한 점을 직접 입력하거나, 아래 예시 버튼을 눌러보세요.")
+
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
+        selected_prompt = None
+
+        with btn_col1:
+            if st.button("데이터 경향 분석", use_container_width=True):
+                selected_prompt = (
+                    "현재 데이터에서 발견할 수 있는 가장 중요한 경향을 숫자를 들어 설명해 줘."
+                )
+        with btn_col2:
+            if st.button("과학 원리 연결", use_container_width=True):
+                selected_prompt = (
+                    "이 데이터에 나타난 현상을 교과서에 나오는 과학 원리와 연결해서 설명해 줘."
+                )
+        with btn_col3:
+            if st.button("심화 탐구(기상)", use_container_width=True):
+                selected_prompt = (
+                    "기상 데이터(기온, 강수량 등)와 재해 발생의 연관성을 분석하고, 추가로 탐구해볼 주제를 추천해 줘."
+                )
+
+        if selected_prompt:
+            st.session_state.chat_history.append({"role": "user", "content": selected_prompt})
+
+            msgs = build_messages(selected_prompt, data_brief, st.session_state.chart_spec, add_data_head, add_context)
+            answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.rerun()
+
+    for turn in st.session_state.chat_history:
+        with st.chat_message(turn["role"]):
+            st.markdown(turn["content"])
+
+# 4. 입력창 및 응답 처리
+if user_prompt := st.chat_input("질문을 입력하세요"):
     if st.session_state.df is None or st.session_state.df.empty:
         st.warning("데이터를 먼저 업로드해 주세요.")
-    elif data_brief.startswith("데이터 요약이 제공되지 않아"):
-        st.warning("데이터 요약이 준비되지 않아, 그래프 중심으로만 안내합니다.")
     else:
         st.session_state.chat_history.append({"role": "user", "content": user_prompt})
         with st.chat_message("user"):
             st.markdown(user_prompt)
+
         with st.chat_message("assistant"):
-            with st.spinner("AI가 데이터를 분석 중입니다..."):
+            with st.spinner("분석 중입니다..."):
+                if data_brief.startswith("데이터 요약이 제공되지 않아"):
+                    st.caption("참고: 데이터 요약 없이 차트 정보만으로 분석합니다.")
+
                 msgs = build_messages(user_prompt, data_brief, st.session_state.chart_spec, add_data_head, add_context)
                 answer = call_openai(msgs, st.session_state.model, st.session_state.api_key)
                 st.markdown(answer)
-        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
-
-
-with st.expander("ℹ️ 도움말 / 주의"):
+# 5. 하단 도움말
+with st.expander("힌트!"):
     st.markdown(
         """
-- 이 AI 챗봇은 '재해·재난과 안전' 단원 수업을 위해 설정되었습니다.
+        ### 추천 프롬프트 예시
+
+        **① 데이터 이해가 안되면**  
+        * `이 데이터에서 가장 기본적으로 알 수 있는 내용을 쉽게 설명해 줘.`  
+        * `열 이름이 너무 낯설어. 각 열이 무엇을 뜻하는지 중학생 눈높이로 정리해 줘.`  
+        * `최근 5년(또는 5개 구간) 동안 값이 어떻게 변했는지 간단히 요약해 줘.`  
+
+        **② 그래프 읽기가 여려우면**  
+        * `지금 차트에서 가장 눈에 띄는 증가 또는 감소 구간을 알려줘.`  
+        * `이 데이터에서 최고값·최저값이 언제(어디서) 나타났는지 알려주고, 그 이유를 추측해줘.`  
+        * `두 변수의 관계(예: 기온과 재해 건수)를 그래프를 보며 설명해 줘.`  
+
+        **③ 재해·재난 연결이 어려우면**  
+        * `이 데이터가 재해·재난과 어떤 관련이 있는지, 실제 사례를 들어 설명해 줘.`  
+        * `데이터를 보면 안전을 위해 어떤 준비가 필요해 보이는지 정리해 줘.`  
+        * `비슷한 데이터를 더 모은다면 어떤 걸 조사해 보면 좋을지, 추가 데이터 아이디어를 3개만 제안해 줘.`  
+
+        **④ 기후 변화 & 심화 탐구를 해 보고 싶으면**  
+        * `이 데이터가 기후 변화와 관련되어 있다면, 어떤 점에서 연결된다고 볼 수 있을까? 근거를 들어 설명해 줘.`  
+        * `기후 변화로 앞으로 이런 재해가 어떻게 바뀔지, 데이터를 바탕으로 합리적인 예측을 해 줘. (너무 단정적으로 말하지 말고 가능성 위주로 말해줘.)`  
+        * `이 데이터를 가지고 "기후 위기와 안전"을 주제로 친구들과 토론한다면, 던져볼 만한 토론 질문을 3~4개 만들어 줘.`  
+        * `이 데이터를 이용해서 3분 발표를 한다고 할 때, 발표 개요(도입–본론–결론)를 짜 줘.`  
         """
     )
+
+with st.expander("웹사이트 사용 소감 / 피드백 남기기"):
+    st.markdown(
+        """
+        이 웹앱을 쓰면서 느낀 점이나, 개선했으면 하는 점이 있다면 여기서 남겨 주세요.  
+        선생님이 다음 수업을 더 좋게 만드는 데 큰 도움이 됩니다. 🙂
+        """
+        "https://forms.gle/fx7WyUL78gkQ2t8PA"
+    )
+    
+    import requests
+
+    GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSdyo9JuRoTCH_QsSKghM_AE9Pwz0vC0yJyPL4zxc_yD68A61A/formResponse"
+    ENTRY_NAME = "entry.693418327"     
+    ENTRY_FEEDBACK = "entry.1589337783"  
+    ENTRY_FEEDBACK = "entry.786544321"
+
+    with st.form("feedback_form"):
+        name = st.text_input("학번과 이름")
+        msg = st.text_area("내가 탐구한 재해/재난과 탐구 내용을 적어주세요.(2-3문장)")
+        msg = st.text_area("웹사이트 사용 소감 및 개선하면 좋을 점 또는 그냥 장윤하 쌤에게 하고 싶은 말을 적어주면 큰 도움이 됩니다^_^")
+        submitted = st.form_submit_button("제출")
+
+        if submitted:
+            data = {
+                ENTRY_NAME: name,
+                ENTRY_FEEDBACK: msg
+            }
+
+            response = requests.post(GOOGLE_FORM_URL, data=data)
+
+            if response.status_code == 200:
+                st.success("피드백이 성공적으로 제출되었습니다! 🙌")
+            else:
+                st.error("제출에 실패했어요. 인터넷 연결 또는 구글폼 설정을 확인해주세요.")
+
+
