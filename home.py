@@ -10,7 +10,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ---- OpenAI SDK 확인 ----
+import requests
+
+# ---- OpenAI 확인 ----
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -96,7 +98,7 @@ if "chart_spec" not in st.session_state:
 # 사이드바: AI 모델 설정
 # =========================
 with st.sidebar:
-    st.markdown("## ⚙️ AI 모델 설정")
+    st.markdown("## AI 모델 설정")
 
     if not st.session_state.api_key:
         st.error(
@@ -116,7 +118,7 @@ with st.sidebar:
         help="해석 정확도가 중요하면 상위 모델, 비용이 중요하면 mini 권장",
     )
     st.divider()
-    st.info("데이터 다운로드는 'data' 페이지를 참고하세요.")
+    st.info("먼저 데이터를 왼쪽 데이터 자료실 페이지에서 준비해 주세요.")
 
 # =========================
 # 상단 헤더
@@ -135,7 +137,7 @@ if not st.session_state.api_key:
 # =========================
 # 1) 데이터 불러오기
 # =========================
-st.markdown("## 데이터 불러오기 📥")
+st.markdown("## 데이터 불러오기")
 file = st.file_uploader(
     "CSV 또는 XLSX 파일 업로드",
     type=["csv", "xlsx"],
@@ -245,34 +247,79 @@ def infer_chart(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], Optiona
 def auto_describe_trend(df: pd.DataFrame, x: str, y: str) -> str:
     """
     간단한 규칙 기반 추세 설명 (2~3문장).
+    - x 기준으로 정렬
+    - 처음 1/3 vs 마지막 1/3 평균을 비교해서 증가/감소 판단
+    - 변화량이 전체 범위에 비해 작으면 '뚜렷한 경향 없음' 처리
     """
     if x not in df.columns or y not in df.columns:
         return ""
-    series = df[y].dropna()
-    if series.empty or not pd.api.types.is_numeric_dtype(series):
+
+    tmp = df[[x, y]].dropna().copy()
+    if tmp.empty:
         return ""
-    first, last = series.iloc[0], series.iloc[-1]
-    direction = last - first
-    trend = "증가" if direction > 0 else "감소" if direction < 0 else "변화가 거의 없음"
 
-    # 변동성 확인
-    diff = series.diff().dropna()
-    if not diff.empty:
-        pos_ratio = (diff > 0).mean()
-        neg_ratio = (diff < 0).mean()
+    # x가 숫자나 날짜면 x 기준으로 정렬
+    if pd.api.types.is_numeric_dtype(tmp[x]) or pd.api.types.is_datetime64_any_dtype(tmp[x]):
+        tmp = tmp.sort_values(by=x)
+
+    series = tmp[y]
+    if not pd.api.types.is_numeric_dtype(series):
+        return ""
+
+    n = len(series)
+    if n < 3:
+        return ""
+
+    # 처음/마지막 1/3 평균 비교
+    k = max(1, n // 3)
+    first_mean = series.iloc[:k].mean()
+    last_mean = series.iloc[-k:].mean()
+    diff_mean = last_mean - first_mean
+
+    data_min, data_max = series.min(), series.max()
+    data_range = data_max - data_min if data_max != data_min else 0
+
+    # 변화량이 너무 작으면 뚜렷한 경향 없음
+    # (전체 범위의 10% 미만 변화는 '크게 변하지 않는다'로 처리)
+    if data_range == 0:
+        trend_desc = "전체 값의 크기가 거의 일정합니다."
+        direction_flag = 0
     else:
-        pos_ratio = neg_ratio = 0
+        rel_change = abs(diff_mean) / data_range
+        if rel_change < 0.1:
+            trend_desc = "전체적으로 큰 증가나 감소 없이 비슷한 수준을 유지합니다."
+            direction_flag = 0
+        elif diff_mean > 0:
+            trend_desc = "전체적으로 시간이 지날수록 값이 감소하기보다는 **늘어나는 경향**이 있습니다."
+            direction_flag = 1
+        else:
+            trend_desc = "전체적으로 시간이 지날수록 값이 증가하기보다는 **줄어드는 경향**이 있습니다."
+            direction_flag = -1
 
-    variability = ""
-    if pos_ratio > 0.2:
-        variability = "전체적으로 값이 증가하는 경향이 있습니다."
-    elif neg_ratio > 0.2:
-        variability = "전체적으로 값이 감소하는 경향이 있습니다."
+    # 변동성(오르내림) 체크
+    diffs = series.diff().dropna()
+    if not diffs.empty:
+        up_ratio = (diffs > 0).mean()
+        down_ratio = (diffs < 0).mean()
     else:
-        variability = "값의 변동 폭이 크고, 뚜렷한 증가/감소 경향은 보이지 않습니다."
+        up_ratio = down_ratio = 0.0
 
-    direction_text = f"처음 값({first:.2f}) 대비 마지막 값({last:.2f})이 {'높아졌습니다' if direction > 0 else '낮아졌습니다' if direction < 0 else '비슷합니다'}."
-    return f"{variability} {direction_text}"
+    if up_ratio > 0.6:
+        var_desc = "중간에 조금씩 내려갈 때도 있지만, 전반적으로는 올라가는 구간이 더 많습니다."
+    elif down_ratio > 0.6:
+        var_desc = "중간에 조금씩 오를 때도 있지만, 전반적으로는 내려가는 구간이 더 많습니다."
+    else:
+        var_desc = "값이 오르내림을 반복하여 변동이 꽤 있는 편입니다."
+
+    # 대표 수치 한 줄
+    summary_text = f"처음 구간 평균은 약 {first_mean:.2f}, 마지막 구간 평균은 약 {last_mean:.2f}입니다."
+
+    # 너무 애매하면 경향 문장을 부드럽게
+    if direction_flag == 0:
+        return f"{trend_desc} {var_desc} {summary_text}"
+    else:
+        return f"{trend_desc} {var_desc} {summary_text}"
+
 
 
 # --- 파일 업로드 처리 ---
@@ -285,26 +332,26 @@ if st.session_state.df is not None and not st.session_state.df.empty:
     df = st.session_state.df
     st.success(f"불러온 데이터: {df.shape[0]:,}행 × {df.shape[1]:,}열")
 
-    with st.expander("📋 데이터 미리보기(상위 100행)", expanded=True):
+    # --- 미리보기 ---
+    with st.expander("📋 데이터 미리보기 (상위 100행)", expanded=True):
         st.dataframe(df.head(100), use_container_width=True)
 
-    st.markdown("### 🔎 빠른 요약")
-    col_meta1, col_meta2, col_meta3 = st.columns(3)
+    # --- 간단 요약 ---
+    st.markdown("### 📊 데이터 요약")
+    col_meta1, col_meta2 = st.columns(2)
     with col_meta1:
         st.metric("행 수", f"{df.shape[0]:,}")
     with col_meta2:
         st.metric("열 수", f"{df.shape[1]:,}")
-    with col_meta3:
-        missing_total = int(df.isna().sum().sum())
-        st.metric("결측치 총합", f"{missing_total:,}")
 
-    with st.expander("🧮 기술통계(수치형)"):
-        st.dataframe(df.describe().T, use_container_width=True)
-    with st.expander("🧾 열 타입 정보"):
-        info = pd.DataFrame({"dtype": df.dtypes.astype(str), "missing": df.isna().sum(), "unique": df.nunique()})
-        st.dataframe(info, use_container_width=True)
+    # 결측치 존재 여부만 표시 (숫자 없음)
+    if df.isna().sum().sum() > 0:
+        st.warning("⚠️ 일부 열에 결측치가 있습니다. (그래프에는 큰 문제 없음)")
+    else:
+        st.success("결측치 없음!")
+
 else:
-    st.info("왼쪽 사이드바에서 **data** 페이지를 클릭해 분석할 데이터를 준비하세요.")
+    st.info("왼쪽 사이드바에서 **데이터 자료실** 페이지를 클릭해 분석할 데이터를 준비하세요.")
     st.stop()
 
 
@@ -313,35 +360,50 @@ else:
 # =========================
 st.markdown("## 데이터 시각화")
 st.caption("핵심 차트 유형만 선택하고, AI와 함께 해석에 집중해 보세요.")
-auto_mode = st.checkbox("🔀 자동 차트 추천 사용", value=True, help="데이터에서 시간/연도/주차/수치 열을 찾아 자동으로 차트를 만듭니다.")
+auto_mode = st.checkbox(
+    "🔀 자동 차트 추천 사용",
+    value=True,
+    help="데이터에서 시간/연도/주차/수치 열을 찾아 자동으로 차트를 만듭니다."
+)
 
 all_cols = df.columns.tolist()
 numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-# 자동 추천 실행
-auto_x, auto_y, auto_size, auto_chart_label = infer_chart(df)
+# ✅ 공통 차트 라벨 리스트
+CHART_LABELS = ["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"]
+
+# 자동 추천 실행 (size는 더 이상 쓰지 않으므로 _로 버림)
+auto_x, auto_y, _, auto_chart_label = infer_chart(df)
+
 if auto_mode:
     st.info(
-        f"추천 결과: 차트 유형='{auto_chart_label}', X축='{auto_x}', Y축='{auto_y if auto_y else '없음'}'"
+        f"추천 결과: 차트 유형='{auto_chart_label}', X축='{auto_x}', "
+        f"Y축='{auto_y if auto_y else '없음'}'"
     )
-    if auto_y is None:
+    if auto_y is None and auto_chart_label != "원(pie)":
         st.warning("수치형 열을 찾지 못했습니다. 필요하면 자동 모드를 끄고 직접 Y축을 선택하세요.")
 
+# 차트 유형 선택
 chart_type = st.selectbox(
     "차트 유형",
-    ["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"],
-    index=["선(line)", "막대(bar)", "산점도(scatter)", "원(pie)", "지도 (위도/경도)"].index(auto_chart_label) if auto_mode else 0,
+    CHART_LABELS,
+    index=CHART_LABELS.index(auto_chart_label) if (auto_mode and auto_chart_label in CHART_LABELS) else 0,
     disabled=auto_mode
 )
 
+# 축 레이블 설정 (size 관련 전부 제거)
 if chart_type.startswith("원("):
-    x_label = "이름 (범주 열)"; y_label = "값 (수치 열)"; size_label = "추가 범례 (선택)"
+    x_label = "이름 (범주 열)"
+    y_label = "값 (수치 열)"
 elif chart_type.startswith("지도"):
-    x_label = "위도 (Latitude) 열"; y_label = "경도 (Longitude) 열"; size_label = "크기/강도 (Magnitude) 열"
+    x_label = "위도 (Latitude) 열"
+    y_label = "경도 (Longitude) 열"
 else:
-    x_label = "X축"; y_label = "Y축 (필요시)"; size_label = "크기 (선택, 산점도용)"
+    x_label = "X축"
+    y_label = "Y축 (필요시)"
 
-viz_col1, viz_col2, viz_col3 = st.columns(3)
+# 축 선택 (x, y만)
+viz_col1, viz_col2 = st.columns(2)
 with viz_col1:
     x_col = st.selectbox(
         x_label,
@@ -350,85 +412,174 @@ with viz_col1:
         disabled=auto_mode and auto_x is not None
     )
 with viz_col2:
+    # 지도/산점도/선/막대 등에서 Y축 선택
     y_options = ["- 선택 안함 -"] + (numeric_cols if numeric_cols else all_cols)
     y_default = auto_y if auto_mode and auto_y in y_options else "- 선택 안함 -"
-    y_col = st.selectbox(
-        y_label,
-        options=y_options,
-        index=y_options.index(y_default) if y_default in y_options else 0,
-        help="수치형 열을 우선 보여줍니다.",
-        disabled=auto_mode and auto_y is not None
-    )
-with viz_col3:
-    size_col = st.selectbox(
-        size_label,
-        options=["- 선택 안함 -"] + all_cols,
-        index=0 if not auto_size else all_cols.index(auto_size) + 1,
-        disabled=auto_mode and auto_size is not None
-    )
+    # 원 그래프는 values가 필수라서 수치형 우선
+    if chart_type.startswith("원("):
+        y_options_pie = numeric_cols if numeric_cols else all_cols
+        y_default_pie = auto_y if auto_mode and auto_y in y_options_pie else (
+            y_options_pie[0] if y_options_pie else None
+        )
+        y_col = st.selectbox(
+            y_label,
+            options=y_options_pie,
+            index=y_options_pie.index(y_default_pie) if (y_default_pie and y_default_pie in y_options_pie) else 0
+        )
+    else:
+        y_col = st.selectbox(
+            y_label,
+            options=y_options,
+            index=y_options.index(y_default) if y_default in y_options else 0,
+            help="수치형 열을 우선 보여줍니다.",
+            disabled=auto_mode and auto_y is not None
+        )
 
+# 툴팁용 컬럼
 hover_cols = st.multiselect(
     "💡 차트 툴팁(마우스 오버)에 표시할 추가 정보",
-    options=all_cols, default=None, disabled=auto_mode
+    options=all_cols,
+    default=None,
+    disabled=auto_mode
 )
+
+# 막대 그래프 집계 함수
 agg_fn = "count"
 if chart_type.startswith("막대("):
-    agg_fn = st.selectbox("집계 함수(막대)", ["count", "sum", "mean", "median"], help="Y축이 없으면 'count'가 자동 적용됩니다.", disabled=auto_mode and auto_y is None)
+    agg_fn = st.selectbox(
+        "집계 함수(막대)",
+        ["count", "sum", "mean", "median"],
+        help="Y축이 없으면 'count'가 자동 적용됩니다.",
+        disabled=auto_mode and auto_y is None
+    )
 
 
-def get_val(opt): return None if (opt == "- 선택 안함 -" or opt == "-") else opt
+def get_val(opt: str):
+    return None if (opt == "- 선택 안함 -" or opt == "-") else opt
 
 
+# 실제 축 값 결정
 x = x_col if not auto_mode else auto_x or x_col
-y = get_val(y_col) if not auto_mode else auto_y or get_val(y_col)
-size = get_val(size_col) if not auto_mode else auto_size or get_val(size_col)
+if chart_type.startswith("원("):
+    y = y_col  # 파이 차트는 y 필수
+else:
+    y = get_val(y_col) if not auto_mode else auto_y or get_val(y_col)
+
 hover = hover_cols if hover_cols else None
 
 fig = None
 chart_spec = None
+
 try:
+    # 1) 선 그래프
     if chart_type.startswith("선("):
         if y is None:
             st.warning("선 그래프는 Y축이 필요합니다.")
         else:
-            fig = px.line(df, x=x, y=y, hover_data=hover, height=500, title=f"{x}에 따른 {y} 변화")
+            fig = px.line(
+                df,
+                x=x,
+                y=y,
+                hover_data=hover,
+                height=500,
+                title=f"{x}에 따른 {y} 변화"
+            )
             chart_spec = {"chart_type": "Line", "x": x, "y": y, "hover": hover}
+
+    # 2) 막대 그래프
     elif chart_type.startswith("막대("):
         if y is None:
+            # x별 개수
             tmp = df.groupby(x).size().reset_index(name="count")
-            fig = px.bar(tmp, x=x, y="count", hover_data=hover, height=500, title=f"{x}별 개수(count)")
+            fig = px.bar(
+                tmp,
+                x=x,
+                y="count",
+                hover_data=hover,
+                height=500,
+                title=f"{x}별 개수(count)"
+            )
             chart_spec = {"chart_type": "Bar (Count)", "x": x, "y": "count", "hover": hover}
         else:
             agg_map = {"count": "count", "sum": "sum", "mean": "mean", "median": "median"}
             tmp = df.groupby(x)[y].agg(agg_map[agg_fn]).reset_index()
             y_agg = f"{agg_fn}_{y}"
             tmp = tmp.rename(columns={y: y_agg})
-            fig = px.bar(tmp, x=x, y=y_agg, hover_data=hover, height=500, title=f"{x}별 {y}의 {agg_fn}")
-            chart_spec = {"chart_type": "Bar (Aggregate)", "x": x, "y": y_agg, "function": agg_fn, "hover": hover}
+            fig = px.bar(
+                tmp,
+                x=x,
+                y=y_agg,
+                hover_data=hover,
+                height=500,
+                title=f"{x}별 {y}의 {agg_fn}"
+            )
+            chart_spec = {
+                "chart_type": "Bar (Aggregate)",
+                "x": x,
+                "y": y_agg,
+                "function": agg_fn,
+                "hover": hover
+            }
+
+    # 3) 산점도
     elif chart_type.startswith("산점도"):
         if y is None:
             st.warning("산점도는 Y축이 필요합니다.")
         else:
-            fig = px.scatter(df, x=x, y=y, size=size, hover_data=hover, opacity=0.7, height=500,
-                             title=f"{x}와 {y}의 관계 (크기: {size})")
-            chart_spec = {"chart_type": "Scatter", "x": x, "y": y, "size": size, "hover": hover}
+            fig = px.scatter(
+                df,
+                x=x,
+                y=y,
+                hover_data=hover,
+                opacity=0.7,
+                height=500,
+                title=f"{x}와 {y}의 관계"
+            )
+            chart_spec = {"chart_type": "Scatter", "x": x, "y": y, "hover": hover}
+
+    # 4) 원 그래프
     elif chart_type.startswith("원("):
         if y is None:
-            st.warning("원 그래프는 '값 (수치 열)' (Y축)이 필요합니다.")
+            st.warning("원 그래프는 '값 (수치 열)'이 필요합니다.")
         else:
-            fig = px.pie(df, names=x, values=y, hover_data=hover, height=500, title=f"{x}별 {y}의 비율")
+            fig = px.pie(
+                df,
+                names=x,
+                values=y,
+                hover_data=hover,
+                height=500,
+                title=f"{x}별 {y}의 비율"
+            )
             chart_spec = {"chart_type": "Pie", "names": x, "values": y, "hover": hover}
+
+    # 5) 지도 (지진 데이터)
     elif chart_type.startswith("지도"):
         if y is None:
             st.warning("지도 시각화는 '위도'와 '경도' 열이 모두 필요합니다.")
         else:
-            fig = px.scatter_geo(df, lat=x, lon=y, size=size, hover_data=hover,
-                                 projection="natural earth", height=600,
-                                 title=f"지도 시각화 (위도:{x}, 경도:{y}, 크기:{size})")
-            fig.update_geos(center={"lat": 36, "lon": 127.5},
-                            lataxis_range=[33, 39], lonaxis_range=[124, 132],
-                            showcountries=True, showcoastlines=True)
-            chart_spec = {"chart_type": "Map (Scatter Geo)", "lat": x, "lon": y, "size": size, "hover": hover}
+            fig = px.scatter_geo(
+                df,
+                lat=x,
+                lon=y,
+                hover_data=hover,
+                projection="natural earth",
+                height=600,
+                title=f"지도 시각화 (위도:{x}, 경도:{y})"
+            )
+            fig.update_geos(
+                center={"lat": 36, "lon": 127.5},
+                lataxis_range=[33, 39],
+                lonaxis_range=[124, 132],
+                showcountries=True,
+                showcoastlines=True,
+            )
+            chart_spec = {
+                "chart_type": "Map (Scatter Geo)",
+                "lat": x,
+                "lon": y,
+                "hover": hover
+            }
+
 except Exception as e:
     st.error(f"차트 생성 중 오류: {e}")
 
@@ -436,8 +587,9 @@ st.session_state.chart_spec = chart_spec
 
 if fig is not None:
     st.plotly_chart(fig, use_container_width=True)
-    if x and y and pd.api.types.is_numeric_dtype(df[y]):
-        st.markdown("#### 🔍 간단한 자동 해석")
+    # 자동 해석은 숫자 y축 있을 때만
+    if x and y and (y in df.columns) and pd.api.types.is_numeric_dtype(df[y]):
+        st.markdown("#### 간단한 자동 해석")
         st.info(auto_describe_trend(df[[x, y]].dropna(), x, y))
 else:
     st.info("위의 옵션을 선택하여 시각화를 생성해 보세요.")
@@ -447,7 +599,7 @@ else:
 # 3) 데이터 해석 챗봇
 # =========================
 st.markdown("## 데이터 해석 챗봇")
-st.caption("AI에게 데이터와 차트를 분석해 달라고 요청해 보세요.")
+st.caption("그래프를 보고 궁금한 점을 챗봇에게 물어보세요.")
 
 
 def summarize_dataframe(df: pd.DataFrame, max_rows: int = 5) -> str:
@@ -559,15 +711,16 @@ col_head, col_opt = st.columns([3, 1])
 with col_head:
     st.subheader("AI 데이터 탐구 대화")
 
-with col_opt:
-    with st.popover("분석 설정"):
-        st.caption("AI에게 제공할 정보를 선택하세요.")
-        add_context = st.checkbox("그래프 메타데이터 포함", True)
-        add_data_head = st.checkbox("데이터 요약본 포함", True)
+with st.popover("⚙️ 대화 설정"):
+    st.caption("AI에게 어느 정도 정보를 넘겨줄지 정하는 곳이에요. 보통은 기본값 그대로 두면 됩니다.")
+    add_context = st.checkbox("현재 그래프 정보도 같이 알려주기", True)
+    add_data_head = st.checkbox("데이터 표 일부(요약)도 같이 알려주기", True)
 
-        if st.button("대화 기록 초기화", type="primary", use_container_width=True):
-            st.session_state.chat_history = []
-            st.rerun()
+    st.divider()
+    st.caption("❗ 문제가 생겼을 때만 아래 버튼을 눌러요.")
+    if st.button("🧺 대화 기록 초기화", type="primary", use_container_width=True):
+        st.session_state.chat_history = []
+        st.rerun()
 
 # 3. 대화 내용 렌더링
 chat_container = st.container()
@@ -608,7 +761,7 @@ with chat_container:
             st.markdown(turn["content"])
 
 # 4. 입력창 및 응답 처리
-if user_prompt := st.chat_input("질문을 입력하세요"):
+if user_prompt := st.chat_input("그래프를 보며 궁금한 점을 적어 보세요. (예: 최근 10년 동안 어떻게 변했어?)"):
     if st.session_state.df is None or st.session_state.df.empty:
         st.warning("데이터를 먼저 업로드해 주세요.")
     else:
@@ -627,7 +780,7 @@ if user_prompt := st.chat_input("질문을 입력하세요"):
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
 # 5. 하단 도움말
-with st.expander("힌트!"):
+with st.expander("힌트! 어떤 질문을 하면 좋을까?"):
     st.markdown(
         """
         ### 추천 프롬프트 예시
@@ -655,39 +808,71 @@ with st.expander("힌트!"):
         """
     )
 
-with st.expander("웹사이트 사용 소감 / 피드백 남기기"):
+with st.expander("웹사이트 사용 소감 남기기"):
     st.markdown(
         """
         이 웹앱을 쓰면서 느낀 점이나, 개선했으면 하는 점이 있다면 여기서 남겨 주세요.  
         선생님이 다음 수업을 더 좋게 만드는 데 큰 도움이 됩니다. 🙂
+        
+        👉 **구글 설문 전체 화면에서 작성하고 싶다면** 아래 링크를 눌러도 돼요.
         """
-        "https://forms.gle/fx7WyUL78gkQ2t8PA"
     )
-    
-    import requests
+    st.markdown("[Google Form 바로가기](https://forms.gle/fx7WyUL78gkQ2t8PA)")
 
+    # --- Google Form 설정 ---
     GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSdyo9JuRoTCH_QsSKghM_AE9Pwz0vC0yJyPL4zxc_yD68A61A/formResponse"
-    ENTRY_NAME = "entry.693418327"     
-    ENTRY_FEEDBACK = "entry.1589337783"  
-    ENTRY_FEEDBACK = "entry.786544321"
+
+    # 각 문항에 해당하는 entry 번호 (실제 번호로 교체 완료)
+    ENTRY_NAME = "entry.693418327"        # 학번과 이름
+    ENTRY_RESEARCH = "entry.1589337783"   # 내가 탐구한 재해/재난과 탐구 내용
+    ENTRY_FEEDBACK = "entry.786544321"    # 웹사이트 사용 소감 및 선생님께 하고 싶은 말
+
+    st.markdown("---")
+
+    st.markdown("⬇️ 아래에 바로 입력하면, 내용이 **Google Form 스프레드시트에 자동 저장**됩니다.")
 
     with st.form("feedback_form"):
         name = st.text_input("학번과 이름")
-        msg = st.text_area("내가 탐구한 재해/재난과 탐구 내용을 적어주세요.(2-3문장)")
-        msg = st.text_area("웹사이트 사용 소감 및 개선하면 좋을 점 또는 그냥 장윤하 쌤에게 하고 싶은 말을 적어주면 큰 도움이 됩니다^_^")
+        msg_research = st.text_area("내가 탐구한 재해/재난과 탐구 내용을 적어주세요. (2-3문장)")
+        msg_feedback = st.text_area(
+            "웹사이트 사용 소감, 개선하면 좋을 점, 또는 장윤하 쌤에게 하고 싶은 말을 자유롭게 적어주세요. ^_^"
+        )
+
+        # SSL 우회 옵션 (학교/기관망에서 인증서 에러 날 때만)
+        ignore_ssl = st.checkbox(
+            "SSL 인증서 검증 무시하고 전송하기 (학교/기관 네트워크에서 오류가 날 때만 체크)",
+            value=False
+        )
+
         submitted = st.form_submit_button("제출")
 
-        if submitted:
+    if submitted:
+        if not msg_research.strip() and not msg_feedback.strip():
+            st.warning("내용을 한 줄 이상 적어 주세요.")
+        else:
             data = {
                 ENTRY_NAME: name,
-                ENTRY_FEEDBACK: msg
+                ENTRY_RESEARCH: msg_research,
+                ENTRY_FEEDBACK: msg_feedback,
             }
 
-            response = requests.post(GOOGLE_FORM_URL, data=data)
+            try:
+                if ignore_ssl:
+                    # ⚠️ 보안상 완전히 안전한 방법은 아니라서, 학교/기관 내부망에서만 사용하는 게 좋아요.
+                    response = requests.post(GOOGLE_FORM_URL, data=data, timeout=10, verify=False)
+                else:
+                    response = requests.post(GOOGLE_FORM_URL, data=data, timeout=10)
 
-            if response.status_code == 200:
-                st.success("피드백이 성공적으로 제출되었습니다! 🙌")
-            else:
-                st.error("제출에 실패했어요. 인터넷 연결 또는 구글폼 설정을 확인해주세요.")
-
-
+                # Google Form은 보통 200 또는 302(리다이렉트)를 돌려줌
+                if response.status_code in (200, 302):
+                    st.success("피드백이 성공적으로 제출되었습니다! 🙌")
+                else:
+                    st.warning(f"요청은 전송했지만, 응답 코드가 예상과 다릅니다: {response.status_code}")
+            except requests.exceptions.SSLError as e:
+                st.error(
+                    "SSL 인증서 오류가 발생했어요. 학교/기관 네트워크에서 HTTPS를 중간에서 검사할 때 자주 생기는 문제입니다.\n"
+                    "위의 'SSL 인증서 검증 무시하고 전송하기' 체크를 활성화한 뒤 다시 제출해 보세요."
+                )
+                st.code(str(e))
+            except Exception as e:
+                st.error(f"제출 중 오류가 발생했습니다: {e}")
